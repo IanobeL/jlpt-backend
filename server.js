@@ -27,7 +27,7 @@ async function startServer() {
     console.log('✓ Hubungan Aman: Server Lokal sukses terhubung ke MongoDB Atlas Cloud!');
     
     const PORT = process.env.PORT || 3001;
-    app.listen(PORT, () => console.log(`✓ Pak Kurir API aktif standby di port ${PORT}`));
+    app.listen(PORT, '0.0.0.0', () => console.log(`✓ Pak Kurir API aktif standby di port ${PORT}`));
   } catch (error) {
     console.error('⚠️ Gagal menyalakan server atau koneksi database:', error);
   }
