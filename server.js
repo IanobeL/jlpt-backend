@@ -6,12 +6,21 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const uri = process.env.MONGODB_URI; 
-const client = new MongoClient(uri);
+// Kita siapkan variabel kosong untuk menampung client dan db nanti
+let client;
 let db;
 
 async function startServer() {
   try {
+    // Membaca URI tepat di dalam fungsi async agar tidak 'undefined' di Railway
+    const uri = process.env.MONGODB_URI;
+    
+    if (!uri) {
+      throw new Error("Gagal membaca MONGODB_URI dari environment Railway!");
+    }
+
+    client = new MongoClient(uri);
+    
     // Mengetuk langsung ke gerbang database
     await client.connect();
     db = client.db('kebun_jlpt');
