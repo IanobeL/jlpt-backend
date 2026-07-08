@@ -58,29 +58,30 @@ app.post('/api/save-config', async (req, res) => {
   }
 });
 
+// =========================================================================
+// RUTE SINKRONISASI BARU: AMBIL 45 SOAL ACAK BERDASARKAN LEVEL
+// =========================================================================
 app.get('/api/get-exam-questions', async (req, res) => {
   try {
-    const levelTarget = req.query.level;
-    const activeRulesDoc = await db.collection('settings').findOne({ type: 'active_rules' });
-    
-    if (!activeRulesDoc) {
-      return res.status(404).json({ error: "Aturan kustom belum diset di panel staff." });
+    const { level } = req.query;
+
+    if (!level) {
+      return res.status(400).json({ error: "Parameter 'level' wajib disertakan (contoh: ?level=N3)" });
     }
 
-    const rules = activeRulesDoc.rules;
-    let finalExamQuestionsSet = [];
+    // Ubah parameter (misal dari 'N3') menjadi huruf kecil ('n3') agar cocok dengan MongoDB Atlas
+    const targetLevel = level.toLowerCase();
 
-    for (const subKey of Object.keys(rules)) {
-      const requiredCount = rules[subKey].count;
-      if (requiredCount > 0) {
-        const sampleQuestions = await db.collection('questions_bank').aggregate([
-          { $match: { level: levelTarget, subCategory: subKey } },
-          { $sample: { size: requiredCount } }
-        ]).toArray();
-        
-        finalExamQuestionsSet.push(...sampleQuestions);
+    // Ambil 45 soal secara acak sekaligus memanfaatkan indeks gabungan level & subCategory
+    const finalExamQuestionsSet = await db.collection('questions_bank').aggregate([
+      { 
+        $match: { level: targetLevel } 
+      },
+      { 
+        $sample: { size: 45 } 
       }
-    }
+    ]).toArray();
+
     res.json(finalExamQuestionsSet);
   } catch (err) {
     res.status(500).json({ error: err.message });
