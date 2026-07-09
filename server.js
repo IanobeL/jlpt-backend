@@ -88,4 +88,45 @@ app.get('/api/get-exam-questions', async (req, res) => {
   }
 });
 
+// =========================================================================
+// 🚀 PERBAIKAN: ENDPOINT RIWAYAT MAHASISWA (Mencegah Error 404 di Railway)
+// =========================================================================
+
+// 1. Endpoint POST untuk menyimpan data riwayat baru dari murid
+app.post('/api/save-history', async (req, res) => {
+  try {
+    const record = req.body;
+    
+    // Memberikan stempel waktu server (timestamp) otomatis saat data masuk
+    record.created_at = new Date();
+
+    // Menyisipkan record mentah ke dalam koleksi 'histories' di MongoDB Cloud
+    const result = await db.collection('histories').insertOne(record);
+    
+    res.status(201).json({ 
+      success: true, 
+      message: 'Riwayat ujian mahasiswa sukses tercatat di MongoDB Atlas!', 
+      insertedId: result.insertedId 
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 2. Endpoint GET untuk menarik data riwayat seluruh murid untuk Portal Guru
+app.get('/api/get-history', async (req, res) => {
+  try {
+    // Menarik seluruh riwayat dan mengurutkannya secara terbalik (descending)
+    // Berdasarkan id dokumen terbaru agar hasil tes paling baru muncul paling atas di tabel
+    const fullHistoryLogsSet = await db.collection('histories')
+      .find({})
+      .sort({ _id: -1 })
+      .toArray();
+
+    res.json(fullHistoryLogsSet);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 startServer();
