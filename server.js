@@ -59,37 +59,48 @@ app.post('/api/save-config', async (req, res) => {
 });
 
 // =========================================================================
-// RUTE SINKRONISASI BARU: AMBIL 45 SOAL ACAK BERDASARKAN LEVEL
+// 🎛️ RUTE SINKRONISASI OPTIMIZED: PENCARIAN FLEKSIBEL & FILTER SUB-SOAL
 // =========================================================================
 app.get('/api/get-exam-questions', async (req, res) => {
   try {
-    const { level } = req.query;
+    const { level, subCategory } = req.query;
 
     if (!level) {
       return res.status(400).json({ error: "Parameter 'level' wajib disertakan (contoh: ?level=N3)" });
     }
 
-    // Ubah parameter (misal dari 'N3') menjadi huruf kecil ('n3') agar cocok dengan MongoDB Atlas
+    // Ubah parameter level menjadi huruf kecil agar pas dengan skema MongoDB Atlas
     const targetLevel = level.toLowerCase();
 
-    // Ambil 45 soal secara acak sekaligus memanfaatkan indeks gabungan level & subCategory
-    const finalExamQuestionsSet = await db.collection('questions_bank').aggregate([
-      { 
-        $match: { level: targetLevel } 
-      },
-      { 
-        $sample: { size: 45 } 
-      }
-    ]).toArray();
+    // Bangun fondasi kueri dasar berdasarkan level ujian
+    let queryFilter = { level: targetLevel };
 
-    res.json(finalExamQuestionsSet);
+    // 🚀 LOGIKA CARA 1: Jika frontend meminta subkategori spesifik, kunci pencariannya langsung di DB
+    if (subCategory) {
+      const subCode = Number(subCategory);
+      if (!isNaN(subCode)) {
+        // Mendukung pencarian fleksibel untuk field 'subCategoryCode', 'sub', maupun 'subCategory'
+        queryFilter.$or = [
+          { subCategoryCode: subCode },
+          { sub: subCode },
+          { subCategory: subCode }
+        ];
+      }
+    }
+
+    // Ambil data dari MongoDB berdasarkan kueri filter di atas
+    const questionsPool = await db.collection('questions_bank')
+      .find(queryFilter)
+      .toArray();
+
+    res.json(questionsPool);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // =========================================================================
-// 🚀 PERBAIKAN: ENDPOINT RIWAYAT MAHASISWA (Mencegah Error 404 di Railway)
+// 🚀 ENDPOINT RIWAYAT MAHASISWA (Mencegah Error 404 di Railway)
 // =========================================================================
 
 // 1. Endpoint POST untuk menyimpan data riwayat baru dari murid
