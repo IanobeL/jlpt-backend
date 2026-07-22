@@ -105,6 +105,22 @@ app.post('/api/save-config', async (req, res) => {
   }
 });
 
+// Versi ringan config (hanya timestamp) — dipakai frontend App 1 untuk cek
+// "apakah config berubah?" tanpa perlu menarik seluruh dokumen rules tiap load.
+app.get('/api/exam-config-version', async (req, res) => {
+  try {
+    const configType = resolveConfigType(req);
+    const currentConfig = await db.collection('settings').findOne(
+      { type: configType },
+      { projection: { updated_at: 1 } }
+    );
+    const version = currentConfig?.updated_at ? new Date(currentConfig.updated_at).getTime() : 0;
+    res.json({ success: true, version });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // =========================================================================
 // 🎛️ RUTE SINKRONISASI OPTIMIZED: PENCARIAN FLEKSIBEL & FILTER SUB-SOAL
 // =========================================================================
@@ -188,15 +204,23 @@ app.get('/api/get-history', async (req, res) => {
       filter.mode = mode;
     }
 
-    let cursor = db.collection('histories').find(filter).sort({ _id: -1 });
-
     if (paginated === 'true') {
       const limitNum = Math.min(Number(limit) || 20, 100);
       const skipNum = Number(skip) || 0;
-      cursor = cursor.skip(skipNum).limit(limitNum);
+      const [historyLogsSet, total] = await Promise.all([
+        db.collection('histories').find(filter).sort({ _id: -1 }).skip(skipNum).limit(limitNum).toArray(),
+        db.collection('histories').countDocuments(filter)
+      ]);
+      return res.json({
+        success: true,
+        data: historyLogsSet,
+        hasMore: skipNum + historyLogsSet.length < total,
+        total
+      });
     }
 
-    const historyLogsSet = await cursor.toArray();
+    // Kompatibilitas lama: tanpa ?paginated=true, tetap kembalikan array mentah.
+    const historyLogsSet = await db.collection('histories').find(filter).sort({ _id: -1 }).toArray();
     res.json(historyLogsSet);
   } catch (err) {
     res.status(500).json({ error: err.message });
