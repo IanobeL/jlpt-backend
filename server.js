@@ -122,6 +122,39 @@ app.get('/api/exam-config-version', async (req, res) => {
 });
 
 // =========================================================================
+// 🔘 FILTER TOPIK ON/OFF: satu pengaturan bersama (bukan per-mode) yang
+// menentukan topic mana saja yang boleh muncul di Test Mode maupun Quiz Mode.
+// Default semua topic aktif jika belum pernah disimpan (kompatibel dengan
+// perilaku lama sebelum fitur ini ada).
+// =========================================================================
+app.get('/api/topic-filter', async (req, res) => {
+  try {
+    const doc = await db.collection('settings').findOne({ type: 'topic_filter' });
+    const enabledTopics = doc?.enabledTopics || Object.fromEntries(Object.keys(TOPIC_LABELS).map(code => [code, true]));
+    res.json({ success: true, enabledTopics });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/save-topic-filter', async (req, res) => {
+  try {
+    const { enabledTopics } = req.body;
+    if (!enabledTopics || typeof enabledTopics !== 'object') {
+      return res.status(400).json({ error: "Field 'enabledTopics' harus berupa objek." });
+    }
+    await db.collection('settings').updateOne(
+      { type: 'topic_filter' },
+      { $set: { type: 'topic_filter', updated_at: new Date(), enabledTopics } },
+      { upsert: true }
+    );
+    res.json({ success: true, message: 'Filter topik berhasil disimpan di MongoDB!' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// =========================================================================
 // 🎛️ RUTE SINKRONISASI OPTIMIZED: PENCARIAN FLEKSIBEL & FILTER SUB-SOAL
 // =========================================================================
 app.get('/api/get-exam-questions', async (req, res) => {
