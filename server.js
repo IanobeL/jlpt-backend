@@ -27,7 +27,13 @@ const TOPIC_LABELS = {
   WRK: '仕事＆交通',
   EDU: '教育＆家庭',
   LIF: '趣味＆生活',
-  TEC: '技術＆報道'
+  TEC: '技術＆報道',
+  16: '文法一週目',
+  17: '文法二週目',
+  18: '文法三週目',
+  19: '文法四週目',
+  20: '文法五週目',
+  21: '文法六週目'
 };
 const TOPIC_MAP_TO_CODE = Object.fromEntries(
   Object.entries(TOPIC_LABELS).map(([code, label]) => [label, code])
