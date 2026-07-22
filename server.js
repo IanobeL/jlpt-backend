@@ -73,9 +73,17 @@ async function startServer() {
 
 // --- Rute Gerbang Data (API) ---
 
+// Config disimpan per mode: 'test' -> 'active_rules' (CONFIG-45, 60 menit/50 soal),
+// 'quiz' -> 'quiz_rules' (panel baru, 30 menit/25 soal). Default ke 'active_rules'
+// jika ?mode= tidak dikirim, supaya pemanggil lama (mode test) tetap bekerja tanpa ubahan.
+function resolveConfigType(req) {
+  return req.query.mode === 'quiz' ? 'quiz_rules' : 'active_rules';
+}
+
 app.get('/api/exam-config', async (req, res) => {
   try {
-    const currentConfig = await db.collection('settings').findOne({ type: 'active_rules' });
+    const configType = resolveConfigType(req);
+    const currentConfig = await db.collection('settings').findOne({ type: configType });
     res.json(currentConfig || { success: false, msg: 'Gunakan konfigurasi standar klien.' });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -84,10 +92,11 @@ app.get('/api/exam-config', async (req, res) => {
 
 app.post('/api/save-config', async (req, res) => {
   try {
+    const configType = resolveConfigType(req);
     const newConfig = req.body;
     await db.collection('settings').updateOne(
-      { type: 'active_rules' },
-      { $set: { type: 'active_rules', updated_at: new Date(), rules: newConfig } },
+      { type: configType },
+      { $set: { type: configType, updated_at: new Date(), rules: newConfig } },
       { upsert: true }
     );
     res.json({ success: true, message: 'Aturan baru berhasil dikunci di MongoDB!' });
@@ -141,20 +150,26 @@ app.get('/api/get-exam-questions', async (req, res) => {
 // =========================================================================
 
 // 1. Endpoint POST untuk menyimpan data riwayat baru dari murid
+//    Field "mode" ('test' | 'quiz') membedakan riwayat Mode Test dan Mode Quiz.
+//    Jika frontend lama belum mengirim mode, default ke 'test' agar data lama tetap konsisten.
 app.post('/api/save-history', async (req, res) => {
   try {
     const record = req.body;
-    
+
+    if (record.mode !== 'quiz' && record.mode !== 'test') {
+      record.mode = 'test';
+    }
+
     // Memberikan stempel waktu server (timestamp) otomatis saat data masuk
     record.created_at = new Date();
 
     // Menyisipkan record mentah ke dalam koleksi 'histories' di MongoDB Cloud
     const result = await db.collection('histories').insertOne(record);
-    
-    res.status(201).json({ 
-      success: true, 
-      message: 'Riwayat ujian mahasiswa sukses tercatat di MongoDB Atlas!', 
-      insertedId: result.insertedId 
+
+    res.status(201).json({
+      success: true,
+      message: 'Riwayat ujian mahasiswa sukses tercatat di MongoDB Atlas!',
+      insertedId: result.insertedId
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -163,10 +178,17 @@ app.post('/api/save-history', async (req, res) => {
 
 // 2. Endpoint GET untuk menarik data riwayat murid untuk Portal Guru
 //    Mendukung ?paginated=true&limit=20&skip=N agar tidak menarik seluruh koleksi tiap kali dibuka.
+//    Mendukung ?mode=test|quiz untuk memisahkan riwayat Test Mode dan Quiz Mode secara ter-scope
+//    (tanpa filter mode, tetap mengembalikan semua riwayat seperti sebelumnya).
 app.get('/api/get-history', async (req, res) => {
   try {
-    const { paginated, limit, skip } = req.query;
-    let cursor = db.collection('histories').find({}).sort({ _id: -1 });
+    const { paginated, limit, skip, mode } = req.query;
+    const filter = {};
+    if (mode === 'test' || mode === 'quiz') {
+      filter.mode = mode;
+    }
+
+    let cursor = db.collection('histories').find(filter).sort({ _id: -1 });
 
     if (paginated === 'true') {
       const limitNum = Math.min(Number(limit) || 20, 100);
