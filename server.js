@@ -258,6 +258,54 @@ app.get('/api/get-exam-questions', async (req, res) => {
 });
 
 // =========================================================================
+// 🎧 PROXY MEDIA GOOGLE DRIVE (gambar & audio soal)
+// Hotlink langsung ke drive.google.com/docs.google.com terbukti tidak reliable
+// untuk audio (Google mengembalikan halaman HTML peringatan virus-scan, bukan
+// file mentah). Endpoint ini fetch file-nya SENDIRI lewat Drive API resmi
+// (files.get?alt=media) memakai API key di server — key TIDAK PERNAH terkirim
+// ke browser murid. Mendukung Range header supaya audio bisa di-seek/stream normal.
+// =========================================================================
+app.get('/api/drive-media/:fileId', async (req, res) => {
+  try {
+    const { fileId } = req.params;
+    const apiKey = process.env.GOOGLE_DRIVE_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: 'GOOGLE_DRIVE_API_KEY belum diset di server.' });
+    }
+
+    const driveUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&key=${apiKey}`;
+    const forwardHeaders = {};
+    if (req.headers.range) {
+      forwardHeaders.Range = req.headers.range;
+    }
+
+    const driveRes = await fetch(driveUrl, { headers: forwardHeaders });
+
+    if (!driveRes.ok && driveRes.status !== 206) {
+      const errText = await driveRes.text();
+      console.error('Drive media proxy failed:', driveRes.status, errText);
+      return res.status(driveRes.status).json({ error: 'Gagal mengambil media dari Google Drive.' });
+    }
+
+    res.status(driveRes.status);
+    const passthroughHeaders = ['content-type', 'content-length', 'content-range', 'accept-ranges'];
+    passthroughHeaders.forEach((h) => {
+      const v = driveRes.headers.get(h);
+      if (v) res.setHeader(h, v);
+    });
+    if (!driveRes.headers.get('accept-ranges')) {
+      res.setHeader('Accept-Ranges', 'bytes');
+    }
+
+    const buffer = Buffer.from(await driveRes.arrayBuffer());
+    res.send(buffer);
+  } catch (err) {
+    console.error('Drive media proxy error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// =========================================================================
 // 🚀 ENDPOINT RIWAYAT MAHASISWA (Mencegah Error 404 di Railway)
 // =========================================================================
 
