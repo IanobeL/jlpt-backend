@@ -171,6 +171,20 @@ app.post('/api/save-topic-filter', async (req, res) => {
 app.get('/api/packages', async (req, res) => {
   try {
     const pkgs = await db.collection('packages').find({}).sort({ createdAt: -1 }).toArray();
+
+    // Union dengan packageId yang benar-benar dipakai di questions_bank tapi belum
+    // pernah "resmi" didaftarkan di koleksi packages (mis. lewat Bulk Import App 2
+    // yang packageId-nya sudah menempel langsung di JSON, tanpa lewat modal + 新規追加).
+    // Tanpa ini, paket seperti itu tidak akan pernah muncul di dropdown Mode Paket App 1.
+    const knownNames = new Set(pkgs.map(p => p.name));
+    const distinctPackageIds = await db.collection('questions_bank').distinct('packageId');
+    distinctPackageIds.forEach(pid => {
+      if (pid && !knownNames.has(pid)) {
+        pkgs.push({ name: pid, subCategoryWeights: {}, isAutoDetected: true });
+        knownNames.add(pid);
+      }
+    });
+
     res.json({ success: true, packages: pkgs });
   } catch (err) {
     res.status(500).json({ error: err.message });
