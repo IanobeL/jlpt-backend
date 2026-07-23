@@ -161,6 +161,49 @@ app.post('/api/save-topic-filter', async (req, res) => {
 });
 
 // =========================================================================
+// 📦 MODE PAKET SOAL (Package Mode): daftar paket (read-only dari sisi App 1,
+// paket sendiri dikelola/di-rename lewat App 2/CMS) + paket mana yang sedang
+// AKTIF (hanya boleh 1 pada satu waktu). Saat aktif, App 1 melewati filter
+// topic & proporsi soal CONFIG-45/50 — dan langsung memakai soal yang sudah
+// ditandai packageId itu, dengan bobot poin per subkategori dari
+// package.subCategoryWeights (diatur di App 2).
+// =========================================================================
+app.get('/api/packages', async (req, res) => {
+  try {
+    const pkgs = await db.collection('packages').find({}).sort({ createdAt: -1 }).toArray();
+    res.json({ success: true, packages: pkgs });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/active-package', async (req, res) => {
+  try {
+    const doc = await db.collection('settings').findOne({ type: 'active_package' });
+    res.json({ success: true, packageId: doc?.packageId || null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/set-active-package', async (req, res) => {
+  try {
+    const { packageId } = req.body;
+    if (packageId !== null && typeof packageId !== 'string') {
+      return res.status(400).json({ error: "Field 'packageId' harus berupa string nama paket, atau null untuk menonaktifkan." });
+    }
+    await db.collection('settings').updateOne(
+      { type: 'active_package' },
+      { $set: { type: 'active_package', updated_at: new Date(), packageId: packageId || null } },
+      { upsert: true }
+    );
+    res.json({ success: true, packageId: packageId || null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// =========================================================================
 // 🎛️ RUTE SINKRONISASI OPTIMIZED: PENCARIAN FLEKSIBEL & FILTER SUB-SOAL
 // =========================================================================
 app.get('/api/get-exam-questions', async (req, res) => {
