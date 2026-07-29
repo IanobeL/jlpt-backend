@@ -258,13 +258,61 @@ app.get('/api/get-exam-questions', async (req, res) => {
 });
 
 // =========================================================================
-// 🎧 PROXY MEDIA GOOGLE DRIVE (gambar & audio soal)
+// 🎧 PROXY MEDIA GOOGLE DRIVE (gambar & audio soal) — DENGAN CACHE 1 JAM
 // Hotlink langsung ke drive.google.com/docs.google.com terbukti tidak reliable
 // untuk audio (Google mengembalikan halaman HTML peringatan virus-scan, bukan
 // file mentah). Endpoint ini fetch file-nya SENDIRI lewat Drive API resmi
 // (files.get?alt=media) memakai API key di server — key TIDAK PERNAH terkirim
-// ke browser murid. Mendukung Range header supaya audio bisa di-seek/stream normal.
+// ke browser murid.
+//
+// Google Drive akan memblokir sementara (403) file yang diakses berkali-kali
+// dalam waktu singkat ("too many users have viewed or downloaded this file").
+// Supaya Drive cuma di-hit SEKALI per file per jam (berapapun banyaknya murid
+// yang minta file yang sama), file lengkap di-buffer di memori server begitu
+// pertama kali diambil, lalu request berikutnya (termasuk Range request untuk
+// seek) dilayani langsung dari cache tanpa pernah menyentuh Drive lagi sampai
+// cache itu kedaluwarsa.
 // =========================================================================
+const DRIVE_MEDIA_CACHE_TTL_MS = 60 * 60 * 1000; // 1 jam
+const driveMediaCache = new Map(); // fileId -> { buffer, contentType, cachedAt }
+const driveMediaFetchInFlight = new Map(); // fileId -> Promise<{buffer, contentType}>
+
+async function getDriveMediaBuffer(fileId, apiKey) {
+  const cached = driveMediaCache.get(fileId);
+  if (cached && Date.now() - cached.cachedAt < DRIVE_MEDIA_CACHE_TTL_MS) {
+    return cached;
+  }
+
+  if (driveMediaFetchInFlight.has(fileId)) {
+    return driveMediaFetchInFlight.get(fileId);
+  }
+
+  const fetchPromise = (async () => {
+    const driveUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&key=${apiKey}`;
+    const driveRes = await fetch(driveUrl); // TANPA Range — selalu ambil file utuh sekali, biar bisa di-cache & di-slice sendiri
+
+    if (!driveRes.ok) {
+      const errText = await driveRes.text();
+      const err = new Error(errText || `Drive respond ${driveRes.status}`);
+      err.status = driveRes.status;
+      throw err;
+    }
+
+    const buffer = Buffer.from(await driveRes.arrayBuffer());
+    const contentType = driveRes.headers.get('content-type') || 'application/octet-stream';
+    const entry = { buffer, contentType, cachedAt: Date.now() };
+    driveMediaCache.set(fileId, entry);
+    return entry;
+  })();
+
+  driveMediaFetchInFlight.set(fileId, fetchPromise);
+  try {
+    return await fetchPromise;
+  } finally {
+    driveMediaFetchInFlight.delete(fileId);
+  }
+}
+
 app.get('/api/drive-media/:fileId', async (req, res) => {
   try {
     const { fileId } = req.params;
@@ -273,31 +321,41 @@ app.get('/api/drive-media/:fileId', async (req, res) => {
       return res.status(500).json({ error: 'GOOGLE_DRIVE_API_KEY belum diset di server.' });
     }
 
-    const driveUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&key=${apiKey}`;
-    const forwardHeaders = {};
-    if (req.headers.range) {
-      forwardHeaders.Range = req.headers.range;
+    let entry;
+    try {
+      entry = await getDriveMediaBuffer(fileId, apiKey);
+    } catch (driveErr) {
+      console.error('Drive media proxy failed:', driveErr.status, driveErr.message);
+      return res.status(driveErr.status || 502).json({ error: 'Gagal mengambil media dari Google Drive.' });
     }
 
-    const driveRes = await fetch(driveUrl, { headers: forwardHeaders });
+    const { buffer, contentType } = entry;
+    const totalSize = buffer.length;
 
-    if (!driveRes.ok && driveRes.status !== 206) {
-      const errText = await driveRes.text();
-      console.error('Drive media proxy failed:', driveRes.status, errText);
-      return res.status(driveRes.status).json({ error: 'Gagal mengambil media dari Google Drive.' });
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Accept-Ranges', 'bytes');
+
+    const rangeHeader = req.headers.range;
+    if (rangeHeader) {
+      const match = /bytes=(\d*)-(\d*)/.exec(rangeHeader);
+      let start = match && match[1] ? parseInt(match[1], 10) : 0;
+      let end = match && match[2] ? parseInt(match[2], 10) : totalSize - 1;
+      if (Number.isNaN(start) || start < 0) start = 0;
+      if (Number.isNaN(end) || end > totalSize - 1) end = totalSize - 1;
+
+      if (start > end || start >= totalSize) {
+        res.setHeader('Content-Range', `bytes */${totalSize}`);
+        return res.status(416).end();
+      }
+
+      res.status(206);
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${totalSize}`);
+      res.setHeader('Content-Length', end - start + 1);
+      return res.send(buffer.subarray(start, end + 1));
     }
 
-    res.status(driveRes.status);
-    const passthroughHeaders = ['content-type', 'content-length', 'content-range', 'accept-ranges'];
-    passthroughHeaders.forEach((h) => {
-      const v = driveRes.headers.get(h);
-      if (v) res.setHeader(h, v);
-    });
-    if (!driveRes.headers.get('accept-ranges')) {
-      res.setHeader('Accept-Ranges', 'bytes');
-    }
-
-    const buffer = Buffer.from(await driveRes.arrayBuffer());
+    res.status(200);
+    res.setHeader('Content-Length', totalSize);
     res.send(buffer);
   } catch (err) {
     console.error('Drive media proxy error:', err.message);
