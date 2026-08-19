@@ -274,8 +274,22 @@ app.get('/api/get-exam-questions', async (req, res) => {
 // cache itu kedaluwarsa.
 // =========================================================================
 const DRIVE_MEDIA_CACHE_TTL_MS = 60 * 60 * 1000; // 1 jam
-const driveMediaCache = new Map(); // fileId -> { buffer, contentType, cachedAt }
+const DRIVE_MEDIA_CACHE_MAX_BYTES = 150 * 1024 * 1024; // 150MB — batas total RAM yang boleh dipakai cache ini
+const driveMediaCache = new Map(); // fileId -> { buffer, contentType, cachedAt, size }
 const driveMediaFetchInFlight = new Map(); // fileId -> Promise<{buffer, contentType}>
+let driveMediaCacheBytes = 0;
+
+function evictDriveMediaCacheIfNeeded(incomingSize) {
+  if (driveMediaCacheBytes + incomingSize <= DRIVE_MEDIA_CACHE_MAX_BYTES) return;
+
+  // Buang entri TERLAMA (cachedAt paling kecil) dulu sampai muat, mirip LRU sederhana
+  const entries = Array.from(driveMediaCache.entries()).sort((a, b) => a[1].cachedAt - b[1].cachedAt);
+  for (const [key, value] of entries) {
+    if (driveMediaCacheBytes + incomingSize <= DRIVE_MEDIA_CACHE_MAX_BYTES) break;
+    driveMediaCache.delete(key);
+    driveMediaCacheBytes -= value.size;
+  }
+}
 
 async function getDriveMediaBuffer(fileId, apiKey) {
   const cached = driveMediaCache.get(fileId);
@@ -300,8 +314,16 @@ async function getDriveMediaBuffer(fileId, apiKey) {
 
     const buffer = Buffer.from(await driveRes.arrayBuffer());
     const contentType = driveRes.headers.get('content-type') || 'application/octet-stream';
-    const entry = { buffer, contentType, cachedAt: Date.now() };
+
+    // Kalau fileId ini sudah pernah di-cache sebelumnya (refresh), lepas dulu ukuran lamanya
+    const previous = driveMediaCache.get(fileId);
+    if (previous) driveMediaCacheBytes -= previous.size;
+
+    evictDriveMediaCacheIfNeeded(buffer.length);
+
+    const entry = { buffer, contentType, cachedAt: Date.now(), size: buffer.length };
     driveMediaCache.set(fileId, entry);
+    driveMediaCacheBytes += buffer.length;
     return entry;
   })();
 
@@ -406,11 +428,16 @@ app.get('/api/get-history', async (req, res) => {
       filter.mode = mode;
     }
 
+    // 'questions' berisi snapshot lengkap tiap soal (teks, opsi, jawaban murid) —
+    // sengaja DIKECUALIKAN dari list ringkas ini agar loading Portal Guru tetap
+    // cepat. Detail lengkap satu sesi ambil lewat GET /api/get-history/:id.
+    const listProjection = { projection: { questions: 0 } };
+
     if (paginated === 'true') {
       const limitNum = Math.min(Number(limit) || 20, 100);
       const skipNum = Number(skip) || 0;
       const [historyLogsSet, total] = await Promise.all([
-        db.collection('histories').find(filter).sort({ _id: -1 }).skip(skipNum).limit(limitNum).toArray(),
+        db.collection('histories').find(filter, listProjection).sort({ _id: -1 }).skip(skipNum).limit(limitNum).toArray(),
         db.collection('histories').countDocuments(filter)
       ]);
       return res.json({
@@ -422,10 +449,26 @@ app.get('/api/get-history', async (req, res) => {
     }
 
     // Kompatibilitas lama: tanpa ?paginated=true, tetap kembalikan array mentah.
-    const historyLogsSet = await db.collection('histories').find(filter).sort({ _id: -1 }).toArray();
+    const historyLogsSet = await db.collection('histories').find(filter, listProjection).sort({ _id: -1 }).toArray();
     res.json(historyLogsSet);
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// 3. Ambil SATU sesi riwayat lengkap dengan field 'questions' (snapshot soal +
+//    jawaban murid) untuk fitur "review jawaban" di Portal Guru — dipanggil
+//    hanya saat guru membuka detail satu sesi, bukan saat memuat daftar.
+app.get('/api/get-history/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const record = await db.collection('histories').findOne({ _id: new ObjectId(id) });
+    if (!record) {
+      return res.status(404).json({ success: false, error: 'Sesi riwayat tidak ditemukan.' });
+    }
+    res.json({ success: true, data: record });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
