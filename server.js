@@ -286,9 +286,17 @@ app.get('/api/get-exam-questions', async (req, res) => {
       // yang bisa disalahartikan frontend sebagai "paket aktif tapi soalnya 0"; dan bukan
       // 200 diam-diam supaya frontend TIDAK BISA lupa menanganinya).
       if (!resolvedPackageId) {
+        // App① memeriksa `!response.ok` LEBIH DULU sebelum sempat mengecek bentuk
+        // body-nya, dan di cabang itu ia menampilkan `error` apa adanya ke murid.
+        // Jadi `error` harus sudah berupa kalimat yang layak dibaca murid — kode
+        // mesinnya pindah ke `code`. Kalau `error` diisi 'no_active_package',
+        // murid benar-benar melihat tulisan "no_active_package" di layar.
+        // Teks di bawah sengaja disamakan dengan fallback milik App① sendiri,
+        // supaya pesannya identik lewat jalur mana pun.
         return res.status(409).json({
-          error: 'no_active_package',
-          message: 'Mode Quiz belum punya paket soal yang aktif. Aktifkan paket lebih dulu lewat App② (atau kirim ?packageId= eksplisit).'
+          code: 'no_active_package',
+          error: 'Quiz Mode belum bisa dimulai — belum ada paket soal yang diaktifkan. Coba lagi nanti atau hubungi pengajar.',
+          message: 'Quiz Mode belum bisa dimulai — belum ada paket soal yang diaktifkan. Coba lagi nanti atau hubungi pengajar.'
         });
       }
 
