@@ -220,9 +220,34 @@ app.post('/api/set-active-package', async (req, res) => {
 // =========================================================================
 // 🎛️ RUTE SINKRONISASI OPTIMIZED: PENCARIAN FLEKSIBEL & FILTER SUB-SOAL
 // =========================================================================
+
+// Kocok array in-place (algoritma Fisher-Yates) — dipakai KHUSUS Mode Quiz supaya
+// urutan soal tidak selalu sama tiap sesi. Test Mode SENGAJA tidak diacak (biar hasil
+// antar peserta/percobaan bisa dibandingkan apa adanya), jadi fungsi ini tidak pernah
+// dipanggil di cabang mode=test.
+function shuffleFisherYates(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+// Jumlah soal Mode Quiz TIDAK tersimpan sebagai satu field angka tunggal — skemanya
+// sama seperti active_rules (Test Mode): rules dipecah per subCategory, masing-masing
+// punya { count, weight }. Total soal Quiz = jumlah semua rules[*].count digabung.
+// Contoh nyata di Atlas saat ini: hanya sub 6/7/8 yang count-nya >0 (16+5+4), totalnya
+// pas 25 — cocok dengan default panel "30 menit/25 soal". Kalau dokumennya belum pernah
+// disimpan (atau semua count kebetulan 0), jatuhkan ke default 25 itu juga.
+async function resolveQuizQuestionLimit() {
+  const doc = await db.collection('settings').findOne({ type: 'quiz_rules' });
+  const total = Object.values(doc?.rules || {}).reduce((sum, r) => sum + (Number(r?.count) || 0), 0);
+  return total > 0 ? total : 25;
+}
+
 app.get('/api/get-exam-questions', async (req, res) => {
   try {
-    const { level, subCategory } = req.query;
+    const { level, subCategory, mode, packageId, limit } = req.query;
 
     if (!level) {
       return res.status(400).json({ error: "Parameter 'level' wajib disertakan (contoh: ?level=N3)" });
@@ -244,6 +269,46 @@ app.get('/api/get-exam-questions', async (req, res) => {
         { subCategoryCode: isNaN(subCode) ? subCategory : subCode },
         { sub: isNaN(subCode) ? subCategory : subCode }
       ];
+    }
+
+    // 📦 MODE QUIZ: eksklusif-paket, TIDAK boleh nyampur dengan cabang Test Mode di bawah.
+    // Test Mode (mode=test ATAU ?mode= tidak dikirim sama sekali) harus tetap byte-identical
+    // dengan perilaku lama — App① Test Mode sudah live dipakai murid, jadi cabang itu
+    // sengaja dibiarkan apa adanya persis di bawah blok if ini.
+    if (mode === 'quiz') {
+      const activePackageDoc = packageId ? null : await db.collection('settings').findOne({ type: 'active_package' });
+      const resolvedPackageId = packageId || activePackageDoc?.packageId;
+
+      // JANGAN diam-diam jatuh ke seluruh pool level kalau tidak ada paket aktif — itu
+      // sama saja memberi murid kuis 25 soal acak dari SEMUA soal level ini, padahal
+      // mencegah itu justru alasan Mode Paket ini dibuat. Sinyal "belum ada paket aktif"
+      // dikirim lewat status 409 + { error: 'no_active_package' } (bukan array kosong,
+      // yang bisa disalahartikan frontend sebagai "paket aktif tapi soalnya 0"; dan bukan
+      // 200 diam-diam supaya frontend TIDAK BISA lupa menanganinya).
+      if (!resolvedPackageId) {
+        return res.status(409).json({
+          error: 'no_active_package',
+          message: 'Mode Quiz belum punya paket soal yang aktif. Aktifkan paket lebih dulu lewat App② (atau kirim ?packageId= eksplisit).'
+        });
+      }
+
+      queryFilter.packageId = resolvedPackageId;
+
+      const questionsPool = await db.collection('questions_bank')
+        .find(queryFilter)
+        .toArray();
+
+      shuffleFisherYates(questionsPool);
+
+      // ?limit= (kalau dikirim & valid) menang atas hitungan quiz_rules — dipakai App① untuk
+      // override cepat tanpa perlu ubah settings. Kalau paketnya lebih kecil dari limit,
+      // .slice() otomatis cuma mengembalikan yang ada (tidak di-pad, tidak dianggap error).
+      const requestedLimit = Number(limit);
+      const effectiveLimit = Number.isFinite(requestedLimit) && requestedLimit > 0
+        ? requestedLimit
+        : await resolveQuizQuestionLimit();
+
+      return res.json(questionsPool.slice(0, effectiveLimit));
     }
 
     // Ambil data dari MongoDB berdasarkan kueri filter di atas
