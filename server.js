@@ -497,11 +497,7 @@ app.post('/api/questions/bulk', async (req, res) => {
     if (!Array.isArray(questions) || questions.length === 0) {
       return res.status(400).json({ success: false, error: "Field 'questions' harus berupa array dan tidak boleh kosong." });
     }
-    const processed = questions.map(q => {
-      const { topic, topicCode } = resolveTopicFields(q);
-      return { ...q, topic, topicCode, isReleased: q.isReleased ?? true };
-    });
-    const result = await db.collection('questions_bank').insertMany(processed);
+    const result = await insertQuestionsBulk(questions);
     res.status(201).json({
       success: true,
       insertedCount: result.insertedCount,
@@ -547,6 +543,221 @@ app.delete('/api/questions/:id', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Soal tidak ditemukan.' });
     }
     res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// =========================================================================
+// 🗂️ RUTE CMS APP ② (JLPT 問題作成): Question Manager & パッケージ管理
+// App ② sebelumnya memakai API tiruan (mock/seed) di server-nya sendiri, jadi
+// isinya tidak pernah nyambung ke MongoDB yang sama dengan App ①. Rute di bawah
+// ini melayani kontrak yang MEMANG SUDAH DIPAKAI frontend App ② apa adanya,
+// supaya App ② cukup mem-proxy /api/* ke sini tanpa dirombak besar-besaran.
+// =========================================================================
+
+// Ubah array id string dari frontend menjadi ObjectId, id yang tidak valid dibuang
+// (daripada melempar error dan menggagalkan seluruh operasi batch).
+function toObjectIds(ids) {
+  if (!Array.isArray(ids)) return [];
+  return ids.filter(id => ObjectId.isValid(id)).map(id => new ObjectId(id));
+}
+
+// Daftar nama package saja (frontend App ② merender list ini sebagai string biasa).
+// Ikut menyertakan packageId yang cuma menempel di questions_bank tapi belum
+// terdaftar resmi di koleksi packages — logika union yang sama seperti GET /api/packages.
+async function listPackageNames() {
+  const pkgs = await db.collection('packages').find({}).sort({ createdAt: -1 }).toArray();
+  const names = pkgs.map(p => p.name);
+  const known = new Set(names);
+  const distinctPackageIds = await db.collection('questions_bank').distinct('packageId');
+  distinctPackageIds.forEach(pid => {
+    if (pid && !known.has(pid)) {
+      names.push(pid);
+      known.add(pid);
+    }
+  });
+  return names;
+}
+
+// Insert batch soal — dipakai bersama oleh /api/questions/bulk dan /api/publish
+async function insertQuestionsBulk(questions) {
+  const processed = questions.map(q => {
+    const { topic, topicCode } = resolveTopicFields(q);
+    return { ...q, topic, topicCode, isReleased: q.isReleased ?? true };
+  });
+  return db.collection('questions_bank').insertMany(processed);
+}
+
+// Cari soal untuk Question Manager. Semua filter opsional kecuali tidak ada yang wajib —
+// tanpa filter sama sekali berarti "semua soal". Mengembalikan array mentah karena
+// frontend App ② langsung memakai hasilnya sebagai array (bukan objek berpembungkus).
+app.get('/api/questions/browse', async (req, res) => {
+  try {
+    const { level, subCategory, topicCode, packageId } = req.query;
+    const queryFilter = {};
+    if (level) queryFilter.level = level.toLowerCase();
+    if (subCategory) queryFilter.subCategory = String(subCategory);
+    if (topicCode) queryFilter.topicCode = topicCode;
+    if (packageId) queryFilter.packageId = packageId;
+
+    const questions = await db.collection('questions_bank').find(queryFilter).toArray();
+    res.json(questions);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Tempelkan (atau lepaskan) beberapa soal sekaligus ke sebuah package
+app.post('/api/questions/assign-package', async (req, res) => {
+  try {
+    const { ids, packageId, unassign } = req.body;
+    const objectIds = toObjectIds(ids);
+    if (objectIds.length === 0) {
+      return res.status(400).json({ success: false, error: "Field 'ids' harus berisi minimal satu _id soal yang valid." });
+    }
+    if (!unassign && !packageId) {
+      return res.status(400).json({ success: false, error: "Field 'packageId' wajib diisi kecuali unassign=true." });
+    }
+
+    const result = await db.collection('questions_bank').updateMany(
+      { _id: { $in: objectIds } },
+      { $set: { packageId: unassign ? '' : packageId } }
+    );
+    res.json({ success: true, modifiedCount: result.modifiedCount });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Hapus beberapa soal sekaligus (tombol "選択した問題を削除")
+app.post('/api/questions/bulk-delete', async (req, res) => {
+  try {
+    const objectIds = toObjectIds(req.body.ids);
+    if (objectIds.length === 0) {
+      return res.status(400).json({ success: false, error: "Field 'ids' harus berisi minimal satu _id soal yang valid." });
+    }
+    const result = await db.collection('questions_bank').deleteMany({ _id: { $in: objectIds } });
+    res.json({ success: true, deletedCount: result.deletedCount });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Ubah field yang sama pada beberapa soal sekaligus (mis. ganti topic/level massal)
+app.post('/api/questions/bulk-update-fields', async (req, res) => {
+  try {
+    const { ids, fields } = req.body;
+    const objectIds = toObjectIds(ids);
+    if (objectIds.length === 0) {
+      return res.status(400).json({ success: false, error: "Field 'ids' harus berisi minimal satu _id soal yang valid." });
+    }
+    if (!fields || typeof fields !== 'object' || Object.keys(fields).length === 0) {
+      return res.status(400).json({ success: false, error: "Field 'fields' harus berupa objek dan tidak boleh kosong." });
+    }
+
+    const update = { ...fields };
+    delete update._id;
+    if (update.topic || update.topicCode) {
+      const { topic, topicCode } = resolveTopicFields(update);
+      update.topic = topic;
+      update.topicCode = topicCode;
+    }
+
+    const result = await db.collection('questions_bank').updateMany(
+      { _id: { $in: objectIds } },
+      { $set: update }
+    );
+    res.json({ success: true, modifiedCount: result.modifiedCount });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Daftarkan batch soal hasil AI Engine ke produksi — nama rute versi App ②,
+// perilakunya identik dengan /api/questions/bulk
+app.post('/api/publish', async (req, res) => {
+  try {
+    const { questions } = req.body;
+    if (!Array.isArray(questions) || questions.length === 0) {
+      return res.status(400).json({ success: false, error: "Field 'questions' harus berupa array dan tidak boleh kosong." });
+    }
+    const result = await insertQuestionsBulk(questions);
+    res.status(201).json({
+      success: true,
+      insertedCount: result.insertedCount,
+      message: `Berhasil mendaftarkan ${result.insertedCount} soal ke MongoDB Atlas!`
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Buat package baru
+app.post('/api/packages', async (req, res) => {
+  try {
+    const name = (req.body.name || '').trim();
+    if (!name) {
+      return res.status(400).json({ success: false, error: "Field 'name' tidak boleh kosong." });
+    }
+    const existing = await db.collection('packages').findOne({ name });
+    if (existing) {
+      return res.status(409).json({ success: false, error: `Package "${name}" sudah ada.` });
+    }
+    await db.collection('packages').insertOne({ name, createdAt: new Date() });
+    res.status(201).json({ success: true, packages: await listPackageNames() });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Ganti nama package. Nama package dipakai sebagai packageId di questions_bank dan
+// di settings.active_package, jadi rename HARUS ikut memperbarui keduanya — kalau tidak,
+// soal-soalnya jadi yatim (menunjuk nama package yang sudah tidak ada).
+app.put('/api/packages/:name', async (req, res) => {
+  try {
+    const oldName = req.params.name;
+    const newName = (req.body.newName || '').trim();
+    if (!newName) {
+      return res.status(400).json({ success: false, error: "Field 'newName' tidak boleh kosong." });
+    }
+    if (newName === oldName) {
+      return res.json({ success: true, newName });
+    }
+    const duplicate = await db.collection('packages').findOne({ name: newName });
+    if (duplicate) {
+      return res.status(409).json({ success: false, error: `Package "${newName}" sudah ada.` });
+    }
+
+    await db.collection('packages').updateOne({ name: oldName }, { $set: { name: newName } });
+    await db.collection('questions_bank').updateMany({ packageId: oldName }, { $set: { packageId: newName } });
+    await db.collection('settings').updateOne(
+      { type: 'active_package', packageId: oldName },
+      { $set: { packageId: newName, updated_at: new Date() } }
+    );
+
+    res.json({ success: true, newName });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Hapus package. Soalnya TIDAK ikut dihapus — cuma dilepas dari package (packageId
+// dikosongkan), supaya bank soal tidak ikut hilang gara-gara paketnya dibubarkan.
+app.delete('/api/packages/:name', async (req, res) => {
+  try {
+    const name = req.params.name;
+    await db.collection('packages').deleteOne({ name });
+    const unassigned = await db.collection('questions_bank').updateMany(
+      { packageId: name },
+      { $set: { packageId: '' } }
+    );
+    await db.collection('settings').updateOne(
+      { type: 'active_package', packageId: name },
+      { $set: { packageId: null, updated_at: new Date() } }
+    );
+
+    res.json({ success: true, unassignedCount: unassigned.modifiedCount, packages: await listPackageNames() });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
